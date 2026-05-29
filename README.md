@@ -181,7 +181,6 @@ El módulo Python enviará por puerto Serial un byte de 1 carácter:
 | `N`  | no reciclable |
 
 ```python
-# Ejemplo de integración futura (NO incluir en Sprint 01)
 import serial
 arduino = serial.Serial("COM3", 9600)
 arduino.write(b"R")   # enviar categoría al Arduino
