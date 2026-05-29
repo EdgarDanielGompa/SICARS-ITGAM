@@ -1,0 +1,8 @@
+# SICARS-ITGAM | Sprint 01
+# Dependencias del entorno virtual
+# Instalar con:  pip install -r requirements.txt
+
+ultralytics>=8.0.0     # YOLOv8 + descarga automática de pesos
+opencv-python>=4.8.0   # captura de cámara y visualización
+numpy>=1.24.0          # requerido por ultralytics y opencv
+Pillow>=9.5.0          # utilidades de imagen (requerido por ultralytics)
