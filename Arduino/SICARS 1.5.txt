@@ -1,0 +1,286 @@
+/**
+ * @file SICARS_ITGAM.ino
+ * @brief Sistema Inteligente de Clasificación y Automatización de Residuos Sólidos
+ * @version 1.5 (Sistema Blindado: Filtro Ultrasónico y Aislamiento de Servos mediante Detach)
+ * @institution Tecnológico de Gustavo A. Madero (ITGAM)
+ * @developer Dircora
+ */
+
+#include <LiquidCrystal.h>
+#include <Servo.h>
+#include <Adafruit_NeoPixel.h>
+
+// Configuración de la interfaz LCD en modo paralelo (RS, E, D4, D5, D6, D7)
+LiquidCrystal lcd(22, 23, 24, 25, 26, 27);
+
+// Instancias para el control de los servomotores
+Servo servoOrganico, servoReciclable, servoNoReciclable;
+char datoSerialCamara;
+
+// Definición de pines para indicadores LED tradicionales y actuadores
+const int pinLedOrganico = 30;    
+const int pinLedReciclable = 31;  
+const int pinLedNoReciclable = 32;
+const int pinBuzzerAlerta = 33;   
+
+// --- CONFIGURACIÓN DE PERIFÉRICOS ---
+const int pinModuloVoz = 5;       // Activación de audio (PLAYE)
+const int pinAroNeopixel = 6;     // Entrada de datos del anillo (DI)
+const int numeroLedsAro = 16;     // Anillo de 16 bits
+
+Adafruit_NeoPixel aroLeds(numeroLedsAro, pinAroNeopixel, NEO_GRB + NEO_KHZ800);
+
+// Definición de pines para el Sensor Ultrasónico de Proximidad Frontal
+const int pinTrigFrontal = 34; 
+const int pinEchoFrontal = 35;
+
+// Definición de pines para los Sensores Ópticos Reflectivos TCRT5000 (Control de Llenado)
+const int pinTcrtOrganico = 36;   
+const int pinTcrtReciclable = 38;   
+const int pinTcrtNoReciclable = 40;   
+
+// Definición de pines para los Pulsadores de Respaldo Manual
+const int pinBotonOrganico = 42;  
+const int pinBotonReciclable = 44;  
+const int pinBotonNoReciclable = 46;  
+
+// --- VARIABLES DE TEMPORIZACIÓN INTELIGENTE ---
+unsigned long tiempoUltimaDeteccion = 0; 
+const unsigned long tiempoEsperaCortesia = 60000; // 1 minuto de gracia (60,000 ms)
+
+unsigned long tiempoUltimaFoto = 0;
+const unsigned long intervaloFoto = 15000; // Captura de IA cada 15 segundos
+
+/**
+ * @brief Calcula la distancia promediando lecturas para eliminar ruidos y rebotes
+ */
+long calcularDistanciaFiltrada() {
+  long sumaDistancias = 0;
+  int lecturasValidas = 0;
+  
+  for(int i = 0; i < 5; i++) {
+    digitalWrite(pinTrigFrontal, LOW);
+    delayMicroseconds(2);
+    digitalWrite(pinTrigFrontal, HIGH);
+    delayMicroseconds(10);
+    digitalWrite(pinTrigFrontal, LOW);
+    
+    long duracion = pulseIn(pinEchoFrontal, HIGH, 20000); // Timeout corto para estabilidad
+    long distancia = duracion * 0.034 / 2;
+    
+    if (distancia > 2 && distancia < 400) { 
+      sumaDistancias += distancia;
+      lecturasValidas++;
+    }
+    delay(5); 
+  }
+  
+  if (lecturasValidas == 0) return 999;
+  return (sumaDistancias / lecturasValidas); 
+}
+
+void encenderAroColor(int r, int g, int b) {
+  for(int i = 0; i < numeroLedsAro; i++) {
+    aroLeds.setPixelColor(i, aroLeds.Color(r, g, b));
+  }
+  aroLeds.show();
+}
+
+void setup() {
+  Serial.begin(9600);   
+  Serial1.begin(9600);  
+  
+  lcd.begin(16, 2);
+  
+  // Inicialización del anillo de LEDs
+  aroLeds.begin();
+  aroLeds.setBrightness(120); // Brillo controlado para evitar caídas de voltaje
+  encenderAroColor(0, 0, 0); 
+  
+  pinMode(pinLedOrganico, OUTPUT); 
+  pinMode(pinLedReciclable, OUTPUT); 
+  pinMode(pinLedNoReciclable, OUTPUT); 
+  pinMode(pinBuzzerAlerta, OUTPUT);
+  pinMode(pinModuloVoz, OUTPUT);      
+  pinMode(pinTrigFrontal, OUTPUT); 
+  
+  pinMode(pinEchoFrontal, INPUT);
+  pinMode(pinTcrtOrganico, INPUT);        
+  pinMode(pinTcrtReciclable, INPUT);        
+  pinMode(pinTcrtNoReciclable, INPUT);
+
+  pinMode(pinBotonOrganico, INPUT_PULLUP);
+  pinMode(pinBotonReciclable, INPUT_PULLUP);
+  pinMode(pinBotonNoReciclable, INPUT_PULLUP);
+
+  // Posicionamiento inicial seguro de los servos y apagado inmediato (Anti-vibración)
+  servoOrganico.attach(9); 
+  servoReciclable.attach(10); 
+  servoNoReciclable.attach(11);
+  
+  servoOrganico.write(0);  
+  servoReciclable.write(0);  
+  servoNoReciclable.write(0);
+  delay(200);
+  
+  // Cortamos el pulso de reposo para iniciar en silencio absoluto
+  servoOrganico.detach(); 
+  servoReciclable.detach(); 
+  servoNoReciclable.detach();
+  
+  digitalWrite(pinModuloVoz, LOW);    
+}
+
+void loop() {
+  long distanciaMonitoreada = calcularDistanciaFiltrada();
+  unsigned long tiempoActual = millis();
+
+  // Rango óptimo de detección para evitar falsos rebotes con el suelo
+  if (distanciaMonitoreada >= 5 && distanciaMonitoreada <= 35) {
+    tiempoUltimaDeteccion = tiempoActual;
+  }
+
+  // MODO OPERATIVO: Activo si hay presencia reciente o dentro del minuto de cortesía
+  if (tiempoActual - tiempoUltimaDeteccion < tiempoEsperaCortesia) {
+    lcd.display(); 
+    encenderAroColor(255, 255, 255); // Flash blanco activo para la ESP32-CAM
+    
+    // 1. EVALUACIÓN DE BOTONES MANUALES
+    if (digitalRead(pinBotonOrganico) == LOW) {
+      ejecutarCicloApertura('O', "APERTURA MANUAL ");
+      tiempoUltimaDeteccion = millis(); 
+    }
+    else if (digitalRead(pinBotonReciclable) == LOW) {
+      ejecutarCicloApertura('R', "APERTURA MANUAL ");
+      tiempoUltimaDeteccion = millis();
+    }
+    else if (digitalRead(pinBotonNoReciclable) == LOW) {
+      ejecutarCicloApertura('N', "APERTURA MANUAL ");
+      tiempoUltimaDeteccion = millis();
+    }
+    
+    // 2. PROCESAMIENTO DE IMAGEN RECONOCIDA POR IA
+    else if (tiempoActual - tiempoUltimaFoto >= intervaloFoto) {
+      if (Serial1.available() > 0) {
+        datoSerialCamara = Serial1.read();
+        if (datoSerialCamara == 'O' || datoSerialCamara == 'R' || datoSerialCamara == 'N') {
+          ejecutarCicloApertura(datoSerialCamara, "DETECCION DE IA ");
+          tiempoUltimaDeteccion = millis();
+          tiempoUltimaFoto = millis(); 
+        }
+      }
+      else {
+         while(Serial1.available() > 0) Serial1.read();
+         tiempoUltimaFoto = tiempoActual; 
+      }
+    }
+    
+    // INTERFAZ EN ESPERA
+    else {
+      lcd.setCursor(0, 0);
+      lcd.print("[SISTEMA ACTIVO]"); 
+      lcd.setCursor(0, 1);
+      lcd.print("Modo: Standby   ");
+    }
+  } 
+  // MODO ECONOMIZADOR: Apagado automático por inactividad
+  else {
+    lcd.noDisplay(); 
+    encenderAroColor(0, 0, 0); 
+    digitalWrite(pinLedOrganico, LOW); 
+    digitalWrite(pinLedReciclable, LOW); 
+    digitalWrite(pinLedNoReciclable, LOW);
+    
+    while(Serial1.available() > 0) Serial1.read(); 
+    delay(200);
+  }
+}
+
+/**
+ * @brief Controla el ciclo asíncrono de apertura energizando el servo solo cuando es requerido
+ */
+void ejecutarCicloApertura(char tipoIdentificado, String origenComando) {
+  lcd.begin(16, 2); 
+  lcd.clear();
+  lcd.print(origenComando);
+  lcd.setCursor(0, 1);
+  
+  digitalWrite(pinBuzzerAlerta, HIGH); 
+  delay(100); 
+  digitalWrite(pinBuzzerAlerta, LOW);
+
+  // Pulso de activación para el Módulo de Voz
+  digitalWrite(pinModuloVoz, HIGH);
+  delay(200);
+  digitalWrite(pinModuloVoz, LOW);
+
+  if (tipoIdentificado == 'O') {
+    lcd.print(">  ORGANICO   <");
+    digitalWrite(pinLedOrganico, HIGH);
+    
+    servoOrganico.attach(9);  // Energiza el servo dinámicamente
+    servoOrganico.write(90);  // Abre compuerta
+    delay(2500);              // Tiempo de espera para depositar residuo
+    servoOrganico.write(0);   // Cierra compuerta
+    delay(200);               // Margen de tiempo físico para completar el cierre
+    servoOrganico.detach();   // Apaga el servo por completo (Elimina zumbidos)
+    
+    digitalWrite(pinLedOrganico, LOW);
+    
+    delay(300); 
+    if (digitalRead(pinTcrtOrganico) == LOW) { 
+      notificarContenedorSaturado("DEPOSIT. ORGANIC");
+    }
+  } 
+  else if (tipoIdentificado == 'R') {
+    lcd.print("> RECICLABLE  <");
+    digitalWrite(pinLedReciclable, HIGH);
+    
+    servoReciclable.attach(10);
+    servoReciclable.write(90); 
+    delay(2500); 
+    servoReciclable.write(0);
+    delay(200);
+    servoReciclable.detach();
+    
+    digitalWrite(pinLedReciclable, LOW);
+    
+    delay(300);
+    if (digitalRead(pinTcrtReciclable) == LOW) {
+      notificarContenedorSaturado("DEPOSIT. RECICLA");
+    }
+  }
+  else if (tipoIdentificado == 'N') {
+    lcd.print("> NO RECICLABLE<");
+    digitalWrite(pinLedNoReciclable, HIGH);
+    
+    servoNoReciclable.attach(11);
+    servoNoReciclable.write(90); 
+    delay(2500); 
+    servoNoReciclable.write(0);
+    delay(200);
+    servoNoReciclable.detach();
+    
+    digitalWrite(pinLedNoReciclable, LOW);
+    
+    delay(300);
+    if (digitalRead(pinTcrtNoReciclable) == LOW) {
+      notificarContenedorSaturado("DEPOSIT. NO REC");
+    }
+  }
+  
+  while(Serial1.available() > 0) Serial1.read(); 
+  lcd.clear();
+}
+
+void notificarContenedorSaturado(String nombreContenedor) {
+  lcd.clear(); 
+  lcd.print("ALERTA DE VOLUMEN");
+  lcd.setCursor(0, 1); 
+  lcd.print("LLENO: " + nombreContenedor);
+  
+  digitalWrite(pinBuzzerAlerta, HIGH); 
+  delay(600); 
+  digitalWrite(pinBuzzerAlerta, LOW);
+  delay(1400);
+}
