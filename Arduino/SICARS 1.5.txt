@@ -1,9 +1,10 @@
 /**
+  *@Archivo para arduino mega 2560
  * @file SICARS_ITGAM.ino
  * @brief Sistema Inteligente de Clasificación y Automatización de Residuos Sólidos
  * @version 1.5 (Sistema Blindado: Filtro Ultrasónico y Aislamiento de Servos mediante Detach)
  * @institution Tecnológico de Gustavo A. Madero (ITGAM)
- * @developer Dircora
+ * @developer Cruz Torres Ricardo
  */
 
 #include <LiquidCrystal.h>
